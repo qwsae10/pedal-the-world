@@ -1,8 +1,9 @@
 // Architect-owned. Tunable constants in one place.
 
-// Paste the Google Maps JavaScript API key here. Empty means Google serves a
-// watermarked "for development purposes only" view.
-export const GOOGLE_MAPS_API_KEY = '';
+// Google Maps JavaScript API key. Visible to anyone by design, so it must stay
+// restricted in the Google Cloud console to this site's address and to the
+// Maps JavaScript API only.
+export const GOOGLE_MAPS_API_KEY = 'AIzaSyD3JWQsswaowpr2P8JGZr5krttRD_rG04U';
 
 export const GUESS_ROUND_COUNT = 5;
 export const GUESS_ROUND_DISTANCE_M = 1000;
