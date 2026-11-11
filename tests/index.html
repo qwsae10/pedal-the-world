@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BikeApp tests</title>
+<style>
+  body { font: 15px/1.5 ui-monospace, Menlo, monospace; margin: 24px; background: #fff; color: #111; }
+  .FAIL { color: #b00020; font-weight: bold; }
+  pre { margin: 0; }
+</style>
+</head>
+<body>
+<h1>BikeApp tests</h1>
+<div id="out">Running...</div>
+<script type="module">
+  // harness.js prefers a global print() (jsc); in browsers that is window.print, the print dialog.
+  window.print = undefined;
+  const out = document.getElementById('out');
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => { lines.push(a.join(' ')); orig(...a); };
+  try {
+    await import('./all.js');
+  } catch (e) {
+    lines.push('FAIL could not run tests: ' + (e && e.message));
+  }
+  out.replaceChildren(...lines.map((l) => {
+    const p = document.createElement('pre');
+    p.textContent = l;
+    if (l.startsWith('FAIL') || / [1-9]\d* failed/.test(l)) p.className = 'FAIL';
+    return p;
+  }));
+</script>
+</body>
+</html>

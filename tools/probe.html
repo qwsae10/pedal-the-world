@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Street View probe</title>
+<div id="pano" style="width:100%;height:70vh"></div>
+<pre id="log"></pre>
+<script>
+  const log = (m) => { document.getElementById('log').textContent += m + '\n'; window.__probe = (window.__probe || []).concat(m); };
+  window.gm_authFailure = () => log('gm_authFailure fired');
+  window.initProbe = async () => {
+    log('maps loaded ' + google.maps.version);
+    const svc = new google.maps.StreetViewService();
+    try {
+      const res = await svc.getPanorama({
+        location: { lat: 48.8584, lng: 2.2945 }, radius: 500,
+        sources: [google.maps.StreetViewSource.GOOGLE],
+      });
+      const d = res.data;
+      log('pano ' + d.location.pano + ' links ' + d.links.length + ' copyright ' + d.copyright);
+      new google.maps.StreetViewPanorama(document.getElementById('pano'), { pano: d.location.pano, disableDefaultUI: true });
+    } catch (e) { log('getPanorama failed: ' + e); }
+  };
+</script>
+<script src="https://maps.googleapis.com/maps/api/js?v=weekly&callback=initProbe&loading=async"></script>
