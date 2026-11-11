@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapillary ride test</title>
+<link rel="stylesheet" href="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css">
+<style>
+  :root { --bg: #10151b; --panel: rgba(22,29,37,.88); --line: #2c3743; --text: #eef2f6; --dim: #9aa8b6; --accent: #3fb68b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 18px/1.4 system-ui, sans-serif; overflow: hidden; }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 2px solid var(--line); border-radius: 14px; min-height: 72px; min-width: 72px; padding: 0 18px; cursor: pointer; }
+  button.on { border-color: var(--accent); }
+  #mly { position: absolute; inset: 0; }
+  .hud { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; z-index: 10; }
+  .speed { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 16px; padding: 6px; }
+  .speed b { min-width: 104px; text-align: center; font-size: 26px; }
+  .tune { display: flex; gap: 10px; flex-wrap: wrap; }
+  .tune[hidden] { display: none; }
+  .place { position: absolute; left: 12px; top: 12px; z-index: 10; background: var(--panel); border-radius: 12px; padding: 10px 14px; max-width: calc(100% - 24px); }
+  .place b { font-size: 22px; }
+  .stats { font: 14px/1.5 ui-monospace, monospace; color: var(--dim); margin-top: 4px; }
+  .stats[hidden] { display: none; }
+  .bar { position: absolute; left: 0; right: 0; top: 0; height: 5px; background: rgba(255,255,255,.12); z-index: 11; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .status { position: absolute; inset: 0; display: grid; place-items: center; z-index: 20; background: rgba(16,21,27,.92); text-align: center; padding: 24px; transition: opacity .5s; }
+  .status.gone { opacity: 0; pointer-events: none; }
+  .status b { display: block; font-size: 28px; margin-bottom: 8px; }
+  .status span { color: var(--dim); }
+  @media (max-width: 640px) { .speed b { min-width: 76px; font-size: 22px; } button { padding: 0 12px; } }
+</style>
+</head>
+<body>
+<div id="mly"></div>
+<div class="bar"><i id="barFill"></i></div>
+<div class="place"><b id="placeName">…</b><div id="placeInfo" class="stats" style="color:var(--text)"></div><div class="stats" id="stats"></div></div>
+<div class="hud">
+  <div class="speed"><button id="slower" aria-label="Slower">−</button><b id="speedLabel"></b><button id="faster" aria-label="Faster">+</button></div>
+  <button id="multBtn"></button>
+  <button id="pauseBtn"></button>
+  <button id="newBtn">🎲 New place</button>
+  <button id="tuneBtn">⚙︎</button>
+  <div class="tune" id="tune" hidden>
+    <button id="stepBtn"></button>
+    <button id="glideBtn"></button>
+    <button id="statsBtn"></button>
+  </div>
+</div>
+<div class="status" id="status"><div><b id="statusTitle">Finding a random place…</b><span id="statusText"></span></div></div>
+
+<script src="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js"></script>
+<script type="module">
+import * as config from '../src/config.js';
+import { decodeTile, tileFor } from './mvt.js';
+import { randomPlace, featureToPoint, tracksFromPoints, nextIndex, findContinuation } from './mlyProbeCore.js';
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || config.MAPILLARY_TOKEN || '';
+
+const TILE_Z = 14;               // Mapillary's image layer is only in z14 tiles (~1.5–2.5 km across)
+const MAX_ATTEMPTS = 10;         // random places to try before giving up
+const MULTS = [1, 2, 3, 5];
+const STEPS_M = [3, 5, 8, 12, 20];
+const BASE_TRANSITION_S = 0.667; // MapillaryJS transition length at speed 1
+const LOAD_TIMEOUT_MS = 1500;    // stop waiting for a slow image after this
+const GLIDE_OVERLAP = 1.12;      // transitions last a bit longer than the step, so motion never stops between images
+const MESH_CANDIDATES = 6;       // top tracks to check for 3D meshes
+const MESH_SAMPLES = 3;          // images checked per track
+
+// ---------- settings ----------
+let speedKmh = Math.round((config.SIM_DEFAULT_SPEED_MPS || 5.5) * 3.6);
+let mult = config.DEFAULT_TRAVEL_MULTIPLIER || 1;
+let stepM = 5;
+let glide = true;
+let showStats = true;
+let paused = false;
+
+// ---------- coverage tiles ----------
+const tiles = new Map();         // "x/y" -> Promise<points[]>
+function loadTile(x, y) {
+  const key = `${x}/${y}`;
+  if (!tiles.has(key)) {
+    const url = `https://tiles.mapillary.com/maps/vtp/mly1_public/2/${TILE_Z}/${x}/${y}?access_token=${encodeURIComponent(token)}`;
+    tiles.set(key, fetch(url).then(async (r) => {
+      if (!r.ok) throw new Error(`tile ${key}: HTTP ${r.status}`);
+      const buf = new Uint8Array(await r.arrayBuffer());
+      const layers = buf.length ? decodeTile(buf, TILE_Z, x, y) : {};
+      return (layers.image || []).map(featureToPoint).filter(Boolean);
+    }).catch((e) => { tiles.delete(key); throw e; }));
+  }
+  return tiles.get(key);
+}
+async function tracksAround(lat, lng, withNeighbours) {
+  const t = tileFor(lat, lng, TILE_Z);
+  const keys = withNeighbours
+    ? [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [t.x + dx, t.y + dy])
+    : [[t.x, t.y]];
+  const lists = await Promise.all(keys.map(([x, y]) => loadTile(x, y).catch(() => [])));
+  return tracksFromPoints(lists.flat());
+}
+
+// ---------- status ----------
+function status(title, text = '') {
+  $('statusTitle').textContent = title;
+  $('statusText').textContent = text;
+  $('status').classList.remove('gone');
+}
+const hideStatus = () => $('status').classList.add('gone');
+
+// ---------- viewer ----------
+let viewer = null;
+function ensureViewer(imageId) {
+  if (viewer) return false;
+  viewer = new mapillary.Viewer({
+    accessToken: token,
+    container: $('mly'),
+    imageId,
+    cameraControls: mapillary.CameraControls.Street,
+    trackResize: true,
+    component: {
+      cover: false, direction: false, sequence: false, zoom: false, bearing: false,
+      keyboard: false, spatial: false, tag: false, popup: false, marker: false, slider: false,
+      cache: true, attribution: true,
+    },
+  });
+  viewer.on('movestart', () => applyTransitionSpeed());
+  viewer.on('navigable', (e) => { navigable = !!e.navigable; });
+  return true;
+}
+let navigable = false;
+let transitionCoef = 1;
+// Reaches into MapillaryJS internals (no public API for this): the transition
+// speed, and switching off its per-image ease-in/ease-out so motion is steady.
+function applyTransitionSpeed() {
+  const ss = viewer && viewer._navigator && viewer._navigator.stateService;
+  if (!ss || typeof ss.setSpeed !== 'function') return;
+  ss.setSpeed(transitionCoef);
+  if (glide && ss._context$) {
+    let ctx = null;
+    ss._context$.subscribe((c) => { ctx = c; }).unsubscribe();
+    const st = ctx && ctx._state;
+    if (st && '_smoothing' in st) st._smoothing = false;
+  }
+}
+
+// ---------- 3D mesh check ----------
+// Images with a mesh get real 3D transitions; without one MapillaryJS falls back
+// to a flat crossfade. Tiles do not say which, so sample a few images per track.
+async function hasMesh(id) {
+  try {
+    const r = await fetch(`https://graph.mapillary.com/${id}?fields=mesh&access_token=${encodeURIComponent(token)}`);
+    if (!r.ok) return false;
+    const j = await r.json();
+    return !!(j.mesh && j.mesh.url);
+  } catch { return false; }
+}
+async function meshShare(t) {
+  const n = t.points.length;
+  const ids = Array.from({ length: MESH_SAMPLES }, (_, k) => t.points[Math.floor(((k + 1) * n) / (MESH_SAMPLES + 1))].id);
+  const res = await Promise.all(ids.map(hasMesh));
+  return res.filter(Boolean).length / res.length;
+}
+
+// ---------- ride ----------
+let place = null;
+let pool = [];                   // tracks in the loaded tiles
+let track = null;
+let cur = 0;
+let travelM = 0;
+let pending = null;
+let switching = false;
+let moves = 0, stalls = 0, fails = 0;
+
+async function newPlace() {
+  switching = true;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const p = randomPlace(Math.random);
+    status('Finding a random place…', `Trying ${p.name} (${attempt}/${MAX_ATTEMPTS})`);
+    try {
+      const tracks = await tracksAround(p.lat, p.lng, false);
+      const good = tracks.filter((t) => t.rideable);
+      if (!good.length) continue;
+      status('Finding a random place…', `${p.name}: checking ${Math.min(MESH_CANDIDATES, good.length)} of ${good.length} rideable tracks for 3D`);
+      const top = good.slice(0, MESH_CANDIDATES);
+      await Promise.all(top.map(async (t) => { t.mesh = await meshShare(t); }));
+      const with3d = top.filter((t) => t.mesh >= 0.6);
+      const choices = with3d.length ? with3d : top;
+      const pick = choices[Math.floor(Math.random() * Math.min(3, choices.length))];
+      place = p;
+      pool = tracks;
+      startTrack(pick, 0);
+      hideStatus();
+      return;
+    } catch (e) {
+      console.warn(e);
+      status('Finding a random place…', `${p.name}: ${e.message}`);
+    }
+  }
+  status('No rideable place found', 'Check the internet connection, then tap 🎲 New place.');
+  switching = false;
+}
+
+function startTrack(t, index) {
+  track = t;
+  cur = index;
+  travelM = t.cum[index];
+  pending = null;
+  switching = false;
+  const id = t.points[index].id;
+  if (!ensureViewer(id)) {
+    transitionCoef = 1;
+    applyTransitionSpeed();
+    viewer.moveTo(id).catch(() => {});
+  }
+  renderPlace();
+}
+
+async function trackEnded() {
+  switching = true;
+  const end = track.points[track.points.length - 1];
+  let next = findContinuation(pool, track);
+  if (!next) {
+    pool = await tracksAround(end.lat, end.lng, true).catch(() => pool);
+    next = findContinuation(pool, track, 50);
+  }
+  if (next) startTrack(next.track, next.index);
+  else newPlace();
+}
+
+function go(i, worldMps, now) {
+  const dist = track.cum[i] - track.cum[cur];
+  const durS = dist / Math.max(worldMps, 0.5);
+  transitionCoef = glide ? Math.max(0.1, Math.min(10, BASE_TRANSITION_S / (durS * GLIDE_OVERLAP))) : 1;
+  cur = i;
+  moves++;
+  const p = { at: now };
+  pending = p;
+  applyTransitionSpeed();
+  viewer.moveTo(track.points[i].id)
+    .then(applyTransitionSpeed)
+    .catch((e) => { if (!/abort|cancel/i.test(String(e && (e.name + ' ' + e.message)))) { fails++; console.warn(e); } })
+    .finally(() => { if (pending === p) pending = null; });
+}
+
+let lastT = performance.now(), frames = 0, fps = 0, fpsT = lastT;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.25, (now - lastT) / 1000);
+  lastT = now;
+  frames++;
+  if (now - fpsT >= 1000) { fps = Math.round((frames * 1000) / (now - fpsT)); frames = 0; fpsT = now; renderStats(); }
+  if (!track || !viewer || switching || !navigable) return;
+
+  const worldMps = (speedKmh / 3.6) * mult;
+  const last = track.cum.length - 1;
+  if (!paused) travelM = Math.min(track.cum[last], travelM + worldMps * dt);
+
+  if (pending && now - pending.at > LOAD_TIMEOUT_MS) { stalls++; pending = null; }
+  if (!pending && !paused) {
+    const i = nextIndex(track.cum, cur, travelM, stepM);
+    if (i >= 0) go(i, worldMps, now);
+    else if (cur === last) trackEnded();
+  }
+  $('barFill').style.width = `${(100 * travelM) / track.cum[last]}%`;
+}
+
+// ---------- HUD ----------
+function renderPlace() {
+  const s = track.stats;
+  $('placeName').textContent = place ? place.name : '…';
+  const year = s.capturedAt ? new Date(s.capturedAt).getFullYear() : '?';
+  const mesh = track.mesh == null ? '' : track.mesh >= 0.6 ? ' · 3D' : ' · no 3D';
+  $('placeInfo').textContent = `${year} · ${(s.lengthM / 1000).toFixed(1)} km · ${s.panoShare > 0.5 ? '360°' : 'flat'} · image every ${s.medianSpacingM.toFixed(0)} m${mesh}`;
+}
+function renderStats() {
+  $('stats').hidden = !showStats;
+  if (!showStats || !track) return;
+  const dur = BASE_TRANSITION_S / transitionCoef;
+  $('stats').innerHTML = `${fps} fps · moves ${moves} · stalls ${stalls} · failed ${fails}<br>`
+    + `world ${(speedKmh * mult).toFixed(0)} km/h · step ${stepM} m · glide ${dur.toFixed(2)} s · image ${cur + 1}/${track.points.length}`;
+}
+function renderHud() {
+  $('speedLabel').textContent = `${speedKmh} km/h`;
+  $('multBtn').textContent = `Travel ×${mult}`;
+  $('pauseBtn').textContent = paused ? '▶ Go' : '⏸ Pause';
+  $('stepBtn').textContent = `Step ${stepM} m`;
+  $('glideBtn').textContent = glide ? 'Glide on' : 'Glide off';
+  $('glideBtn').className = glide ? 'on' : '';
+  $('statsBtn').textContent = showStats ? 'Stats on' : 'Stats off';
+  renderStats();
+}
+const cycle = (list, v) => list[(list.indexOf(v) + 1) % list.length];
+$('slower').onclick = () => { speedKmh = Math.max(0, speedKmh - 2); renderHud(); };
+$('faster').onclick = () => { speedKmh = Math.min(45, speedKmh + 2); renderHud(); };
+$('multBtn').onclick = () => { mult = cycle(MULTS, mult); renderHud(); };
+$('pauseBtn').onclick = () => { paused = !paused; renderHud(); };
+$('newBtn').onclick = () => { if (!switching) newPlace(); };
+$('tuneBtn').onclick = () => { $('tune').hidden = !$('tune').hidden; };
+$('stepBtn').onclick = () => { stepM = cycle(STEPS_M, stepM); renderHud(); };
+$('glideBtn').onclick = () => { glide = !glide; renderHud(); };
+$('statsBtn').onclick = () => { showStats = !showStats; renderHud(); };
+
+// For debugging from the console.
+window.__ride = { get track() { return track; }, get cur() { return cur; }, get viewer() { return viewer; }, get place() { return place; } };
+
+if (typeof mapillary === 'undefined') status('Could not load MapillaryJS', 'Check the internet connection.');
+else if (!token) status('No Mapillary token', 'Set MAPILLARY_TOKEN in src/config.js.');
+else { renderHud(); requestAnimationFrame(frame); newPlace(); }
+</script>
+</body>
+</html>

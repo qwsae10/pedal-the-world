@@ -5,6 +5,10 @@
 // Maps JavaScript API only.
 export const GOOGLE_MAPS_API_KEY = 'AIzaSyD3JWQsswaowpr2P8JGZr5krttRD_rG04U';
 
+// Mapillary client token (mapillary.com/dashboard/developers). A client token is
+// public by design, like the Google key.
+export const MAPILLARY_TOKEN = 'MLY|28314499558224011|3b5a270ac41acdb5321af0d4c60c0516';
+
 export const GUESS_ROUND_COUNT = 5;
 export const GUESS_ROUND_DISTANCE_M = 1000;
 export const GUESS_OPTION_COUNT = 4;
