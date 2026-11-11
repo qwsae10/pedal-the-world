@@ -19,7 +19,8 @@ import { haversineM, bearingDeg, angleDiff, normalizeDeg } from './geo.js';
 /** @typedef {import('../contracts.js').RideState} RideState */
 /** @typedef {import('../contracts.js').RideEngine} RideEngine */
 
-const MAX_MOVES_PER_TICK = 5;
+const MAX_MOVES_PER_TICK = 8;
+const MIN_MULTIPLIER = 0.1;
 
 /**
  * @param {{provider: import('../contracts.js').PanoProvider, config?: object}} opts
@@ -33,10 +34,21 @@ export function createRideEngine({ provider, config = {} }) {
     TURN_OPTION_MIN_SEPARATION_DEG: defaults.TURN_OPTION_MIN_SEPARATION_DEG,
     ...config,
   };
+  // Only an explicitly supplied default counts, so engines built with a bare
+  // config (tests) travel at 1x. The UI calls setMultiplier with its saved value.
+  const defaultMultiplier = clampMultiplier(config.DEFAULT_TRAVEL_MULTIPLIER, 1);
+
+  function clampMultiplier(x, fallback) {
+    const n = Number(x);
+    if (!isFinite(n)) return fallback;
+    return Math.max(MIN_MULTIPLIER, n);
+  }
 
   const listeners = new Set();
   /** @type {Map<string, Promise<Pano|null>>} */
   let loads = new Map();
+  /** @type {Map<string, Pano>} panos whose load has resolved, for sync step lengths */
+  let resolved = new Map();
 
   let began = false;
   let gen = 0;
@@ -47,6 +59,8 @@ export function createRideEngine({ provider, config = {} }) {
   let prevId = null;
   let speedMps = 0;
   let distanceM = 0;
+  let travelM = 0;
+  let multiplier = defaultMultiplier;
   let elapsedMs = 0;
   let pending = 0;
   let lastTickMs = null;
@@ -59,10 +73,13 @@ export function createRideEngine({ provider, config = {} }) {
   function loadPano(id) {
     let p = loads.get(id);
     if (!p) {
+      const myLoads = loads;
+      const myResolved = resolved;
       p = Promise.resolve()
         .then(() => provider.getPano(id))
         .then((r) => r || null, () => null);
       loads.set(id, p);
+      p.then((r) => { if (r) myResolved.set(id, r); });
       p.then((r) => { if (!r && loads.get(id) === p) loads.delete(id); });
     }
     return p;
@@ -108,16 +125,33 @@ export function createRideEngine({ provider, config = {} }) {
   function prefetch() {
     if (!pano) return;
     const { pick } = plan();
-    if (pick) loadPano(pick.id);
+    if (!pick) return;
+    const myGen = gen;
+    loadPano(pick.id).then((r) => {
+      // Tell the UI the step length once it is known.
+      // While a tick is in flight it will emit a state that already carries the length.
+      if (!r || myGen !== gen || !latest || latest.stepLengthM !== null || busy) return;
+      const now = plan().pick;
+      if (now && now.id === pick.id) emit(false);
+    });
   }
 
   function snapshot(moved) {
-    const { turnOptions } = plan();
+    const { turnOptions, pick } = plan();
+    const target = pick ? resolved.get(pick.id) : null;
+    const stepLengthM = target ? haversineM(pano, target) : null;
+    const stepProgress = stepLengthM && stepLengthM > 0 ? Math.min(1, Math.max(0, pending / stepLengthM)) : 0;
     return {
       pano,
       heading,
       speedMps,
       distanceM,
+      travelM,
+      multiplier,
+      nextPanoId: pick ? pick.id : null,
+      nextHeading: pick ? normalizeDeg(pick.heading) : null,
+      stepLengthM,
+      stepProgress,
       elapsedMs,
       turnOptions,
       chosenTurnId: turnOptions.some((o) => o.id === chosenTurnId) ? chosenTurnId : null,
@@ -139,7 +173,7 @@ export function createRideEngine({ provider, config = {} }) {
       if (!pick) { pending = 0; break; }
       const target = await loadPano(pick.id);
       if (myGen !== gen) return moves;
-      if (!target) { failed.add(pick.id); continue; }
+      if (!target) { failed.add(pick.id); emit(false); continue; }
       const step = haversineM(pano, target);
       if (pending + 1e-6 < step) break; // epsilon absorbs float noise at exact multiples
       pending = Math.max(0, pending - step);
@@ -170,12 +204,14 @@ export function createRideEngine({ provider, config = {} }) {
       prevId = null;
       speedMps = 0;
       distanceM = 0;
+      travelM = 0;
       elapsedMs = 0;
       pending = 0;
       lastTickMs = null;
       chosenTurnId = null;
       failed = new Set();
       loads = new Map();
+      resolved = new Map();
       emit(false);
       prefetch();
     },
@@ -193,9 +229,11 @@ export function createRideEngine({ provider, config = {} }) {
       lastTickMs = nowMs;
       speedMps = v;
       const d = (v * dt) / 1000;
+      const dTravel = d * multiplier;
       distanceM += d;
+      travelM += dTravel;
       elapsedMs += dt;
-      pending += d;
+      pending += dTravel;
 
       if (busy) { emit(false); return; }
       busy = true;
@@ -216,6 +254,11 @@ export function createRideEngine({ provider, config = {} }) {
       chosenTurnId = panoId;
       emit(false);
       prefetch();
+    },
+
+    setMultiplier(x) {
+      multiplier = clampMultiplier(x, defaultMultiplier);
+      if (began && pano) emit(false);
     },
 
     onState(listener) {

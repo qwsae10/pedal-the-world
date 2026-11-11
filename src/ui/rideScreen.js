@@ -13,6 +13,20 @@ import { formatDistance, formatDuration, distanceUnitLabel } from './format.js';
 
 const COUNTRY_RECHECK_MOVES = 25;
 const IDLE_HINT_MS = 3000;
+const MULTIPLIER_KEY = 'bikeapp.multiplier.v1';
+
+function loadMultiplier(config) {
+  const list = config.TRAVEL_MULTIPLIERS || [1];
+  const fallback = config.DEFAULT_TRAVEL_MULTIPLIER || list[0] || 1;
+  try {
+    const v = parseFloat(localStorage.getItem(MULTIPLIER_KEY));
+    if (list.includes(v)) return v;
+  } catch (e) { /* storage blocked */ }
+  return fallback;
+}
+function saveMultiplier(v) {
+  try { localStorage.setItem(MULTIPLIER_KEY, String(v)); } catch (e) { /* storage blocked */ }
+}
 
 const ARROW_SVG = '<svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true" focusable="false"><path d="M12 3 L20 13 H14.5 V21 H9.5 V13 H4 Z" fill="currentColor"/></svg>';
 
@@ -46,6 +60,9 @@ export function createRideScreen(ctx, mode, nav) {
   const isGuess = mode === 'guess';
 
   const engine = createRideEngine({ provider });
+  const multipliers = config.TRAVEL_MULTIPLIERS && config.TRAVEL_MULTIPLIERS.length ? config.TRAVEL_MULTIPLIERS : [1];
+  let multiplier = loadMultiplier(config);
+  engine.setMultiplier(multiplier);
   const dropper = createDropper({ provider, countries, rng: Math.random, config });
   const game = isGuess ? createGuessGame({ dropper, countries, rng: Math.random, config }) : null;
   const speed = createSpeedSource();
@@ -57,6 +74,8 @@ export function createRideScreen(ctx, mode, nav) {
   const streetView = createStreetView(maps, panoEl);
 
   const pauseBtn = button('⏸ Pause', () => pause(), { cls: 'pause-btn', aria: 'Pause ride' });
+  const travelLabel = () => `Travel ×${multiplier}`;
+  const travelBtn = button(travelLabel(), () => cycleMultiplier(), { cls: 'travel-btn', aria: `Travel speed ×${multiplier}. Tap to change.` });
   const infoPanel = el('div', { class: 'panel info' });
   const turnsEl = el('div', { class: 'turns', role: 'group', 'aria-label': 'Choose a way to go' });
   const hintEl = el('div', { class: 'panel hint', hidden: true, role: 'status' }, 'Start pedalling');
@@ -82,7 +101,7 @@ export function createRideScreen(ctx, mode, nav) {
   const root = el('div', { class: `screen ride ride-${mode}` },
     panoEl,
     el('div', { class: 'ride-ui' },
-      el('div', { class: 'topleft' }, hud.root, infoPanel), pauseBtn, turnsEl, hintEl, actionBtn, simPanel && simPanel.root),
+      el('div', { class: 'topleft' }, hud.root, infoPanel), pauseBtn, travelBtn, turnsEl, hintEl, actionBtn, simPanel && simPanel.root),
     guessOverlay && guessOverlay.root,
     pauseLayer.root, summaryLayer.root, busyLayer.root);
 
@@ -109,6 +128,19 @@ export function createRideScreen(ctx, mode, nav) {
     ms: banked.ms + (lastState ? lastState.elapsedMs : 0),
   });
   const canAct = () => phase === 'riding' && !busy && !paused;
+
+  function cycleMultiplier() {
+    const i = multipliers.indexOf(multiplier);
+    multiplier = multipliers[(i + 1) % multipliers.length];
+    saveMultiplier(multiplier);
+    engine.setMultiplier(multiplier);
+    travelBtn.textContent = travelLabel();
+    travelBtn.setAttribute('aria-label', `Travel speed ×${multiplier}. Tap to change.`);
+  }
+
+  // Pausing the engine also freezes the view's motion zoom.
+  function pauseEngine() { engine.pause(); streetView.setPaused(true); }
+  function resumeEngine() { engine.resume(); streetView.setPaused(false); }
 
   // ---- hint ----
   function updateHint(now = performance.now()) {
@@ -193,7 +225,8 @@ export function createRideScreen(ctx, mode, nav) {
       if (snap) { moves = 0; updateCountry(state.pano); }
       else if (state.moved && ++moves % COUNTRY_RECHECK_MOVES === 0) updateCountry(state.pano);
     } else if (phase === 'riding') {
-      game.addDistance(state.distanceM - roundBase);
+      // The round is 1 km of travel through the world, so the multiplier shortens it.
+      game.addDistance(state.travelM - roundBase);
     }
   });
 
@@ -202,8 +235,9 @@ export function createRideScreen(ctx, mode, nav) {
     if (lastState) { banked.m += lastState.distanceM; banked.ms += lastState.elapsedMs; }
     snapNext = true;
     engine.begin(pano);
-    roundBase = engine.getState() ? engine.getState().distanceM : 0;
+    roundBase = engine.getState() ? engine.getState().travelM : 0;
     paused = false;
+    streetView.setPaused(false);
   }
 
   // ---- busy / error layers ----
@@ -225,7 +259,7 @@ export function createRideScreen(ctx, mode, nav) {
     busy = true;
     const prevPhase = phase;
     phase = 'loading';
-    engine.pause();
+    pauseEngine();
     showBusy(firstDrop ? 'Finding a road…' : 'Finding a new place…');
     updateHint();
     try {
@@ -239,7 +273,7 @@ export function createRideScreen(ctx, mode, nav) {
       phase = prevPhase;
       const back = firstDrop
         ? button('Home', () => nav.home())
-        : button('Keep riding', () => { busyLayer.hide(); phase = 'riding'; engine.resume(); updateHint(); });
+        : button('Keep riding', () => { busyLayer.hide(); phase = 'riding'; resumeEngine(); updateHint(); });
       showError(() => { busy = false; dropExplorer(); }, back);
     } finally {
       busy = false;
@@ -253,7 +287,7 @@ export function createRideScreen(ctx, mode, nav) {
     busy = true;
     phase = 'loading';
     guessOverlay.hide();
-    engine.pause();
+    pauseEngine();
     showBusy('Finding a road…');
     updateHint();
     try {
@@ -295,7 +329,7 @@ export function createRideScreen(ctx, mode, nav) {
     lastGamePhase = st.phase;
     if (st.phase === 'guessing') {
       phase = 'guessing';
-      engine.pause();
+      pauseEngine();
       guessOverlay.showGuessing(st);
     } else if (st.phase === 'reveal') {
       phase = 'reveal';
@@ -313,7 +347,7 @@ export function createRideScreen(ctx, mode, nav) {
   function pause() {
     if (!canAct()) return;
     paused = true;
-    engine.pause();
+    pauseEngine();
     updateHint();
     const resumeBtn = button('Resume', resume, { cls: 'primary' });
     pauseLayer.show(
@@ -325,14 +359,14 @@ export function createRideScreen(ctx, mode, nav) {
   function resume() {
     paused = false;
     pauseLayer.hide();
-    engine.resume();
+    resumeEngine();
     updateHint();
   }
   function endRide() {
     pauseLayer.hide();
     phase = 'ended';
     paused = false;
-    engine.pause();
+    pauseEngine();
     speed.source.stop();
     wake.stop();
     if (simPanel) simPanel.root.hidden = true;

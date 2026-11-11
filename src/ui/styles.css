@@ -114,6 +114,7 @@ h1, h2, p { margin: 0; }
 .hud-value { font-size: clamp(44px, 9vmin, 104px); font-weight: 760; line-height: 1.05; }
 .hud-unit { font-size: clamp(16px, 2.6vmin, 30px); color: var(--text-dim); }
 
+.travel-btn { top: calc(var(--gap) * 2 + var(--tap)); right: var(--gap); background: var(--panel); backdrop-filter: blur(6px); font-variant-numeric: tabular-nums; min-width: 9em; }
 .pause-btn { top: var(--gap); right: var(--gap); background: var(--panel); backdrop-filter: blur(6px); }
 .info { max-width: 60vw; }
 .info-country { font-size: 1.5em; font-weight: 700; }
@@ -213,6 +214,8 @@ h1, h2, p { margin: 0; }
 @media (max-width: 640px) and (orientation: portrait) {
   /* Pause keeps the top-right corner; the HUD sits on its own row beneath it. */
   .topleft { top: calc(var(--gap) * 2 + var(--tap)); right: var(--gap); }
+  /* The travel-speed button takes the free top-left corner opposite Pause. */
+  .travel-btn { top: var(--gap); left: var(--gap); right: auto; min-width: 0; }
   .hud { gap: 10px; width: 100%; justify-content: space-between; box-sizing: border-box; }
   .hud-tile { min-width: 0; }
   .hud-value { font-size: clamp(26px, 9.5vw, 44px); }

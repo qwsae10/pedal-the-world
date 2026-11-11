@@ -28,3 +28,12 @@ export const SIM_MAX_SPEED_MPS = 12;
 export const APP_NAME = 'Pedal the World';
 export const UNITS = 'km';                   // 'km' or 'mi'
 export const LOOK_RECENTER_MS = 4000;        // after dragging the view, drift back to the road
+
+// Travel multiplier: how much faster she moves through the world than she pedals.
+export const TRAVEL_MULTIPLIERS = [1, 2, 3, 5];
+export const DEFAULT_TRAVEL_MULTIPLIER = 3;
+
+// Motion between panoramas
+export const CROSSFADE_MS = 280;             // blend from one panorama to the next
+export const MOTION_ZOOM_MAX = 0.35;         // zoom-in during a step to suggest forward motion; 0 turns it off
+export const MOTION_ZOOM_CONE_DEG = 35;      // only zoom while looking roughly along the road

@@ -56,7 +56,17 @@
  * @property {Pano} pano              panorama currently shown
  * @property {number} heading         current direction of travel
  * @property {number} speedMps        latest speed reading
- * @property {number} distanceM       total distance ridden this ride
+ * @property {number} distanceM       real distance pedalled this ride (speed x time)
+ * @property {number} travelM         distance moved through the world: pedalled
+ *                                    distance with the travel multiplier applied
+ * @property {number} multiplier      current travel multiplier (1 = realistic)
+ * @property {string|null} nextPanoId   panorama the engine will move to next (the
+ *                                      rider's chosen turn, else the default), or
+ *                                      null when there is nowhere to go
+ * @property {number|null} nextHeading  heading of the link to nextPanoId
+ * @property {number|null} stepLengthM  metres from pano to nextPanoId; null until
+ *                                      the next panorama has been fetched
+ * @property {number} stepProgress    0..1, how far along the current step
  * @property {number} elapsedMs       time since the ride started, paused time excluded
  * @property {TurnOption[]} turnOptions  ways forward at the upcoming step; empty
  *                                       or length 1 when there is no real choice
@@ -75,6 +85,9 @@
  * @property {() => RideState|null} getState
  * @property {() => void} pause
  * @property {() => void} resume
+ * @property {(multiplier: number) => void} setMultiplier
+ *   Scales movement through the world from now on. distanceM, speedMps and
+ *   elapsedMs stay real; travelM and panorama movement are multiplied.
  */
 
 /**

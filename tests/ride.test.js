@@ -313,3 +313,130 @@ test('begin resets everything', async () => {
   await c.engine.tick(10, 5000); // first tick after begin: no distance
   assertEqual(c.engine.getState().distanceM, 0);
 });
+
+// ---- travel multiplier and step info ----
+
+async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
+
+test('multiplier: default 1 without config, config default honoured, clamped', () => {
+  const road = straightRoad(5, 10, 0);
+  const c = setup(road);
+  c.engine.begin(road[0]);
+  assertEqual(c.engine.getState().multiplier, 1);
+  const d = setup(road, {}, { DEFAULT_TRAVEL_MULTIPLIER: 3 });
+  d.engine.begin(road[0]);
+  assertEqual(d.engine.getState().multiplier, 3);
+  c.engine.setMultiplier(0);
+  assertEqual(c.engine.getState().multiplier, 0.1);
+  c.engine.setMultiplier(NaN);
+  assertEqual(c.engine.getState().multiplier, 1);
+  c.engine.setMultiplier(4);
+  assertEqual(c.engine.getState().multiplier, 4);
+});
+
+test('multiplier scales travelM and movement but not distanceM or elapsedMs', async () => {
+  const c = setup(straightRoad(10, 10, 0));
+  c.engine.setMultiplier(3);
+  await startRide(c);
+  await c.engine.tick(5, 2000); // 10 m real, 30 m travelled -> 3 panos
+  const s = c.engine.getState();
+  assertClose(s.distanceM, 10, 1e-9);
+  assertClose(s.travelM, 30, 1e-9);
+  assertEqual(s.elapsedMs, 2000);
+  assertEqual(s.speedMps, 5);
+  assertEqual(s.pano.id, 'p3');
+  assertEqual(s.multiplier, 3);
+});
+
+test('changing the multiplier mid-ride does not rescale the past; begin keeps it', async () => {
+  const c = setup(straightRoad(30, 10, 0));
+  await startRide(c);
+  await c.engine.tick(5, 2000); // 10 m at x1
+  c.engine.setMultiplier(2);
+  await c.engine.tick(5, 4000); // 10 m real, 20 m travel
+  const s = c.engine.getState();
+  assertClose(s.distanceM, 20, 1e-9);
+  assertClose(s.travelM, 30, 1e-9);
+  assertEqual(s.pano.id, 'p3');
+  c.engine.begin(c.byId('p0'), 0);
+  assertEqual(c.engine.getState().multiplier, 2);
+  assertEqual(c.engine.getState().travelM, 0);
+});
+
+test('nextPanoId/nextHeading: at begin, after a move, at a dead end', async () => {
+  const road = straightRoad(3, 10, 90);
+  const c = setup(road);
+  c.engine.begin(road[0], 90);
+  assertEqual(c.engine.getState().nextPanoId, 'p1');
+  assertEqual(c.engine.getState().nextHeading, 90);
+  await c.engine.tick(0, 0);
+  await c.engine.tick(10, 1000);
+  assertEqual(c.engine.getState().pano.id, 'p1');
+  assertEqual(c.engine.getState().nextPanoId, 'p2');
+  await c.engine.tick(10, 2000);
+  // p2 is a dead end: the only way is back
+  assertEqual(c.engine.getState().pano.id, 'p2');
+  assertEqual(c.engine.getState().nextPanoId, 'p1');
+  const lone = { id: 'x', lat: 0, lng: 0, links: [] };
+  const d = setup([lone]);
+  d.engine.begin(lone);
+  assertEqual(d.engine.getState().nextPanoId, null);
+  assertEqual(d.engine.getState().nextHeading, null);
+  assertEqual(d.engine.getState().stepLengthM, null);
+});
+
+test('nextPanoId follows chooseTurn and a failed link re-pick', async () => {
+  const c = setup(fork());
+  await startRide(c, 'p1', 0);
+  await c.engine.tick(10, 1000); // p2, fork ahead
+  const opts = c.engine.getState().turnOptions;
+  const other = opts.find((o) => o.id !== c.engine.getState().nextPanoId);
+  assert(!!other, 'fork has an alternative');
+  c.engine.chooseTurn(other.id);
+  assertEqual(c.engine.getState().nextPanoId, other.id);
+  const f = setup(fork(), { failIds: ['p3'] });
+  await startRide(f, 'p1', 0);
+  await f.engine.tick(10, 1000);
+  assertEqual(f.engine.getState().nextPanoId, 'p3');
+  await f.engine.tick(10, 2000); // p3 fails -> re-pick
+  const id = f.engine.getState().nextPanoId;
+  assert(id !== 'p3', 'no longer targets the failed pano');
+});
+
+test('stepLengthM and stepProgress', async () => {
+  const c = setup(straightRoad(10, 20, 0));
+  c.engine.begin(c.byId('p0'), 0);
+  assertEqual(c.engine.getState().stepLengthM, null);
+  assertEqual(c.engine.getState().stepProgress, 0);
+  const seen = c.states.length;
+  await settle();
+  assert(c.states.length > seen, 'a state is emitted when the prefetch resolves');
+  assertClose(c.engine.getState().stepLengthM, 20, 0.1);
+  await c.engine.tick(0, 0);
+  await c.engine.tick(5, 1000); // 5 m of a 20 m step
+  assertClose(c.engine.getState().stepProgress, 0.25, 0.01);
+  await settle();
+  await c.engine.tick(5, 2000);
+  assertClose(c.engine.getState().stepProgress, 0.5, 0.01);
+  const m = setup(straightRoad(10, 20, 0));
+  m.engine.setMultiplier(2);
+  m.engine.begin(m.byId('p0'), 0);
+  await settle();
+  await m.engine.tick(0, 0);
+  await m.engine.tick(5, 1000); // 10 m travelled
+  assertClose(m.engine.getState().stepProgress, 0.5, 0.01);
+});
+
+test('high multiplier crosses several panos in one tick, bounded per tick', async () => {
+  const c = setup(straightRoad(40, 10, 0));
+  c.engine.setMultiplier(5);
+  await startRide(c);
+  await c.engine.tick(10, 2000); // 20 m real -> 100 m travelled -> 10 panos, capped at 8
+  assertEqual(c.engine.getState().pano.id, 'p8');
+  assertClose(c.engine.getState().travelM, 100, 1e-9);
+  assertClose(c.engine.getState().distanceM, 20, 1e-9);
+  assertEqual(c.states.filter((s) => s.moved).length, 8);
+  c.engine.setMultiplier(2);
+  await c.engine.tick(0, 2100);
+  assertEqual(c.engine.getState().pano.id, 'p8');
+});
