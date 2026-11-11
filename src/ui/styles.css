@@ -208,3 +208,27 @@ h1, h2, p { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---- upright phones: stack the ride controls instead of using the four corners ---- */
+@media (max-width: 640px) and (orientation: portrait) {
+  /* Pause keeps the top-right corner; the HUD sits on its own row beneath it. */
+  .topleft { top: calc(var(--gap) * 2 + var(--tap)); right: var(--gap); }
+  .hud { gap: 10px; width: 100%; justify-content: space-between; box-sizing: border-box; }
+  .hud-tile { min-width: 0; }
+  .hud-value { font-size: clamp(26px, 9.5vw, 44px); }
+  .hud-unit { font-size: 14px; }
+  .info { max-width: 100%; }
+
+  /* Bottom stack, from the bottom up: test pedals, action button, turn arrows. */
+  .sim { left: var(--gap); right: var(--gap); width: auto; min-width: 0; }
+  .sim-stop { display: none; }
+  .action-btn { bottom: calc(var(--gap) * 2 + 124px); min-width: 0; }
+  .turns { bottom: calc(var(--gap) * 3 + 124px + var(--tap)); max-width: calc(100vw - var(--gap) * 2); }
+  .turn { min-width: 84px; }
+  .hint { top: 40%; width: 80%; text-align: center; }
+
+  /* Long country names (United Arab Emirates, North Macedonia) get one column and may wrap. */
+  .guess-panel { padding: 0.9em; }
+  .options { grid-template-columns: 1fr; }
+  .option { min-height: var(--tap); font-size: 22px; overflow-wrap: anywhere; }
+}
